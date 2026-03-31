@@ -100,27 +100,31 @@ vector_index::HNSWOptions ConvertToHnswOptions(const PgVectorIdxOptionsPB& optio
   };
 }
 
+template <class LSM, template<class, class> class Factory>
+typename LSM::Options::VectorIndexFactory VectorLSMFactoryImpl(
+    const hnsw::BlockCachePtr& block_cache, const PgVectorIdxOptionsPB& options,
+    const MemTrackerPtr& mem_tracker) {
+  auto hnsw_options = ConvertToHnswOptions(options);
+  using FactoryImpl = vector_index::MakeVectorIndexFactory<Factory, LSM>;
+  return [block_cache, hnsw_options,
+          backend = options.hnsw().backend(), mem_tracker](vector_index::FactoryMode mode) {
+    return FactoryImpl::Create(mode, block_cache, hnsw_options, backend, mem_tracker);
+  };
+}
+
 template <class LSM>
 typename LSM::Options::VectorIndexFactory VectorLSMFactory(
     const hnsw::BlockCachePtr& block_cache, const PgVectorIdxOptionsPB& options,
     const MemTrackerPtr& mem_tracker) {
-  auto hnsw_options = ConvertToHnswOptions(options);
   switch (options.hnsw().backend()) {
     case HnswBackend::USEARCH: [[fallthrough]];
-    case HnswBackend::YB_HNSW: {
-      using FactoryImpl = vector_index::MakeVectorIndexFactory<
-          ann_methods::UsearchIndexFactory, LSM>;
-      return [block_cache, hnsw_options,
-              backend = options.hnsw().backend(), mem_tracker](vector_index::FactoryMode mode) {
-        return FactoryImpl::Create(mode, block_cache, hnsw_options, backend, mem_tracker);
-      };
-    }
-    case HnswBackend::HNSWLIB: {
-      using FactoryImpl = vector_index::MakeVectorIndexFactory<
-          ann_methods::HnswlibIndexFactory, LSM>;
-      return [hnsw_options](vector_index::FactoryMode mode) {
-        return FactoryImpl::Create(mode, hnsw_options);
-      };
+    case HnswBackend::YB_HNSW_USEARCH:
+      return VectorLSMFactoryImpl<LSM, ann_methods::UsearchIndexFactory>(
+          block_cache, options, mem_tracker);
+    case HnswBackend::HNSWLIB: [[fallthrough]];
+    case HnswBackend::YB_HNSW_HNSWLIB: {
+      return VectorLSMFactoryImpl<LSM, ann_methods::HnswlibIndexFactory>(
+          block_cache, options, mem_tracker);
     }
   }
   FATAL_INVALID_PB_ENUM_VALUE(HnswBackend, options.hnsw().backend());
@@ -279,8 +283,8 @@ class DocVectorIndexImpl : public DocVectorIndex {
               const std::string& storage_dir,
               const DocVectorIndexThreadPoolProvider& thread_pool_provider) {
     auto merge_filter_factory = [this]() -> typename LSM::Options::MergeFilterFactory::result_type {
-      auto reader = VERIFY_RESULT(
-          context_->CreateReverseMappingReader(ReadHybridTime::Max()));
+      auto reader =
+          VERIFY_RESULT(context_->CreateReverseMappingReader(ReadHybridTime::Max(), nullptr));
       return std::make_unique<VectorMergeFilter>(lsm_.LogPrefix(), std::move(reader));
     };
 
@@ -322,8 +326,8 @@ class DocVectorIndexImpl : public DocVectorIndex {
   }
 
   Result<DocVectorIndexSearchResult> Search(
-      Slice vector, const vector_index::SearchOptions& options,
-      bool could_have_missing_entries) override {
+      Slice vector, const vector_index::SearchOptions& options, bool could_have_missing_entries,
+      DocDBStatistics* statistics) override {
     auto entries = VERIFY_RESULT(lsm_.Search(
         VERIFY_RESULT(VectorFromYSQL<Vector>(vector)), options));
 
@@ -331,7 +335,7 @@ class DocVectorIndexImpl : public DocVectorIndex {
     auto start_time = MonoTime::Now();
 
     auto reverse_mapping_reader = VERIFY_RESULT(
-        context_->CreateReverseMappingReader(ReadHybridTime::Max()));
+        context_->CreateReverseMappingReader(ReadHybridTime::Max(), statistics));
 
     DocVectorIndexSearchResult result;
     VLOG_WITH_FUNC(4) << "could_have_missing_entries: " << could_have_missing_entries

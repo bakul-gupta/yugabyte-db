@@ -14,10 +14,10 @@
 #include "yb/util/test_macros.h"
 #include "yb/util/test_thread_holder.h"
 #include "yb/util/tsan_util.h"
-#include "yb/util/ysql_binary_runner.h"
 
 #include "yb/yql/pgwrapper/libpq_test_base.h"
 #include "yb/yql/pgwrapper/libpq_utils.h"
+#include "yb/yql/pgwrapper/ysql_binary_runner.h"
 
 DECLARE_bool(enable_object_locking_for_table_locks);
 DECLARE_bool(ysql_yb_ddl_transaction_block_enabled);
@@ -36,7 +36,11 @@ class PgConcurrentDDLsTest : public LibPqTestBase {
     opts->extra_tserver_flags.emplace_back(
         "--ysql_yb_ddl_transaction_block_enabled=true");
     opts->extra_tserver_flags.emplace_back(
+        "--wait_for_ysql_backends_catalog_version_client_master_rpc_timeout_ms=20000");
+    opts->extra_tserver_flags.emplace_back(
         yb::Format("--ysql_pg_conf_csv=$0", "yb_enable_concurrent_ddl=true"));
+    opts->extra_master_flags.emplace_back(
+        "--master_ysql_operation_lease_ttl_ms=10000");
   }
 
   int GetNumTabletServers() const override {
